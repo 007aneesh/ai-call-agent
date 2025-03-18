@@ -11,13 +11,20 @@ from dotenv import load_dotenv
 import requests
 from datetime import datetime
 from models import create_booking
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 load_dotenv()
 
 # Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-SMS_KEY = os.getenv('SMS_KEY')
+SMTP_EMAIL = os.getenv("SMTP_EMAIL")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 PORT = int(os.getenv('PORT', 8010))
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 current_datetime = datetime.now()
 current_date = current_datetime.strftime("%d-%m-%Y")
 current_time = current_datetime.strftime("%I:%M %p")
@@ -26,6 +33,7 @@ I am Cosmo, a healthcare diagnostic expert. I can assist you with healthcare que
 
 Test Booking Requirements:
 - Phone Number (must be valid)
+- Email Address (for booking confirmation)
 - City
 - Test Name
 - Preferred Date
@@ -34,13 +42,14 @@ Test Booking Requirements:
 
 Key Behaviors:
 1. Ask only one follow-up question at a time to gather required information
-2. After test selection:
+2. After collecting phone number, always ask for email address for booking confirmation
+3. After test selection:
    - Suggest preparation guidelines
    - Recommend optimal timing based on current date ({current_date}) and time ({current_time})
-3. Language Protocol:
+4. Language Protocol:
    - Default: English
    - Switch to Hindi only if user communicates in Hindi/Hinglish
-4. Persona: Female healthcare expert
+5. Persona: Female healthcare expert
 
 Sample Interaction Flow:
 User: "Can you book a test?"
@@ -55,19 +64,24 @@ Booking Confirmation:
 
 Note: Always verify phone numbers for validity before proceeding with booking.
 """
-VOICE = 'alloy'
-LOG_EVENT_TYPES = [
-    'error', 'response.content.done', 'rate_limits.updated',
-    'response.done', 'input_audio_buffer.committed',
-    'input_audio_buffer.speech_stopped', 'input_audio_buffer.speech_started',
-    'session.created'
-]
-SHOW_TIMING_MATH = False
 
 app = FastAPI()
 
 if not OPENAI_API_KEY:
     raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
+
+LOG_EVENT_TYPES = [
+    'session.update',
+    'conversation.item.create',
+    'conversation.item.truncate',
+    'response.create',
+    'response.complete',
+    'input_audio_buffer.speech_started',
+    'input_audio_buffer.speech_stopped'
+]
+
+SHOW_TIMING_MATH = False
+VOICE = "alloy"
 
 @app.get("/", response_class=JSONResponse)
 async def index_page():
@@ -81,10 +95,10 @@ async def handle_incoming_call(request: Request):
     print("Body:", body.decode())
     response = VoiceResponse()
     # <Say> punctuation to improve text-to-speech flow
-    response.say("Hello there! I am an AI call assistant created by Aman Patel")
+    response.say("Hello there! I am an AI call assistant created by Aneesh")
     response.pause(length=1)
     response.say("O.K. you can start talking!")
-    host = "api.amanpatel.in" #request.url.hostname
+    host = request.url.hostname
     connect = Connect()
     connect.stream(url=f'wss://{host}/media-stream')
     response.append(connect)
@@ -94,47 +108,42 @@ async def handle_incoming_call(request: Request):
 async def handle_media_stream(websocket: WebSocket):
     """Handle WebSocket connections between Twilio and OpenAI."""
     print("Client connected")
-    url = "https://www.fast2sms.com/dev/bulkV2"
-    api_key = "WOfGCbYeFN7rynSxqPRpXMhJZu2g406mjBi3tlavUdkQ5IK1A9CqMnKYXaVxAEWd6N1u3OfTP9mSG7Je"
     
-    # Example booking details - in real app, these would come from conversation
-    phone = "9462255025"
-    city = "Bangalore"
-    test_name = "Blood Test"
-    preferred_date = "06-12-2024"
-    preferred_time = "10:00AM"
-    collection_type = "In-Clinic Collection"
-    
-    # Store booking in database
-    try:
-        booking = create_booking(
-            phone=phone,
-            city=city,
-            test_name=test_name,
-            preferred_date=preferred_date,
-            preferred_time=preferred_time,
-            collection_type=collection_type,
-            booking_datetime=datetime.now()
-        )
-        print(f"Booking stored in database with ID: {booking.id}")
-    except Exception as e:
-        print(f"Error storing booking in database: {e}")
-    
-    msg=f'Your test booking is confirmed! Details: \nPhone: {phone} \nCity: {city} \nTest: {test_name} \nDate: {preferred_date} \nTime: {preferred_time} \nCollection: {collection_type} \nThank you for choosing us!'
-    
-    querystring = {
-        "authorization": api_key,
-        "message": msg,
-        "language": "english",
-        "route": "q",
-        "numbers": phone
+    # Initialize booking details as None
+    booking_details = {
+        'phone': None,
+        'email': None,
+        'city': None,
+        'test_name': None,
+        'preferred_date': None,
+        'preferred_time': None,
+        'collection_type': None
     }
-    headers = {
-        'cache-control': "no-cache"
-    }
-    response = requests.request("GET", url, headers=headers, params=querystring)
-    print(response.status_code)
-    print(response.text)
+    
+    # Store booking in database and send confirmation when all details are collected
+    async def process_booking():
+        try:
+            booking = create_booking(
+                phone=booking_details['phone'],
+                email=booking_details['email'],
+                city=booking_details['city'],
+                test_name=booking_details['test_name'],
+                preferred_date=booking_details['preferred_date'],
+                preferred_time=booking_details['preferred_time'],
+                collection_type=booking_details['collection_type'],
+                booking_datetime=datetime.now()
+            )
+            print(f"Booking stored in database with ID: {booking.id}")
+            
+            # Send email confirmation
+            confirmation_result = await send_booking_confirmation(booking)
+            print(f"Email confirmation status: {confirmation_result['status']}")
+            if confirmation_result['status'] == 'error':
+                print(f"Email error: {confirmation_result['message']}")
+                
+        except Exception as e:
+            print(f"Error processing booking: {e}")
+    
     await websocket.accept()
 
     async with websockets.connect(
@@ -180,14 +189,73 @@ async def handle_media_stream(websocket: WebSocket):
                 if openai_ws.open:
                     await openai_ws.close()
 
-        async def send_to_twilio():
-            """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
+        async def receive_from_openai():
+            """Receive events from the OpenAI Realtime API, process conversation, and send audio back to Twilio."""
             nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
                     if response['type'] in LOG_EVENT_TYPES:
                         print(f"Received event: {response['type']}", response)
+
+                    # Process conversation content for booking details
+                    if response.get('type') == 'conversation.item.create':
+                        content = response.get('item', {}).get('content', [])
+                        for item in content:
+                            if item.get('type') == 'text':
+                                text = item.get('text', '').lower()
+                                # Extract phone number
+                                if any(word in text for word in ['phone', 'number', 'mobile']):
+                                    import re
+                                    phone_match = re.search(r'\b\d{10}\b', text)
+                                    if phone_match:
+                                        booking_details['phone'] = phone_match.group()
+                                
+                                # Extract email
+                                if any(word in text for word in ['email', '@']):
+                                    import re
+                                    email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
+                                    if email_match:
+                                        booking_details['email'] = email_match.group()
+                                
+                                # Extract city
+                                if 'city' in text:
+                                    cities = ['bangalore', 'delhi', 'mumbai', 'chennai', 'kolkata']
+                                    for city in cities:
+                                        if city in text.lower():
+                                            booking_details['city'] = city.title()
+                                
+                                # Extract test name
+                                if 'test' in text:
+                                    tests = ['blood test', 'urine test', 'covid test', 'diabetes test']
+                                    for test in tests:
+                                        if test in text.lower():
+                                            booking_details['test_name'] = test.title()
+                                
+                                # Extract date
+                                if any(word in text for word in ['date', 'day']):
+                                    import re
+                                    date_match = re.search(r'\d{2}[-/]\d{2}[-/]\d{4}', text)
+                                    if date_match:
+                                        booking_details['preferred_date'] = date_match.group()
+                                
+                                # Extract time
+                                if any(word in text for word in ['time', 'timing', 'schedule']):
+                                    import re
+                                    time_match = re.search(r'\d{1,2}[:]\d{2}\s*(?:AM|PM|am|pm)', text)
+                                    if time_match:
+                                        booking_details['preferred_time'] = time_match.group().upper()
+                                
+                                # Extract collection type
+                                if 'collection' in text:
+                                    if 'home' in text.lower():
+                                        booking_details['collection_type'] = 'Home Collection'
+                                    elif 'clinic' in text.lower():
+                                        booking_details['collection_type'] = 'In-Clinic Collection'
+                                
+                                # Check if all required fields are filled
+                                if all(booking_details.values()):
+                                    await process_booking()
 
                     if response.get('type') == 'response.audio.delta' and 'delta' in response:
                         audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
@@ -205,20 +273,13 @@ async def handle_media_stream(websocket: WebSocket):
                             if SHOW_TIMING_MATH:
                                 print(f"Setting start timestamp for new response: {response_start_timestamp_twilio}ms")
 
-                        # Update last_assistant_item safely
                         if response.get('item_id'):
                             last_assistant_item = response['item_id']
 
                         await send_mark(websocket, stream_sid)
 
-                    # Trigger an interruption. Your use case might work better using `input_audio_buffer.speech_stopped`, or combining the two.
-                    if response.get('type') == 'input_audio_buffer.speech_started':
-                        print("Speech started detected.")
-                        if last_assistant_item:
-                            print(f"Interrupting response with id: {last_assistant_item}")
-                            await handle_speech_started_event()
             except Exception as e:
-                print(f"Error in send_to_twilio: {e}")
+                print(f"Error in receive_from_openai: {e}")
 
         async def handle_speech_started_event():
             """Handle interruption when the caller's speech starts."""
@@ -260,7 +321,7 @@ async def handle_media_stream(websocket: WebSocket):
                 await connection.send_json(mark_event)
                 mark_queue.append('responsePart')
 
-        await asyncio.gather(receive_from_twilio(), send_to_twilio())
+        await asyncio.gather(receive_from_twilio(), receive_from_openai())
 
 async def send_initial_conversation_item(openai_ws):
     """Send initial conversation item if AI talks first."""
@@ -300,23 +361,46 @@ async def initialize_session(openai_ws):
 
     # Uncomment the next line to have the AI speak first
     # await send_initial_conversation_item(openai_ws)
+
+async def send_booking_confirmation(booking):
+    sender_email = SMTP_EMAIL
+    receiver_email = booking.email  # We'll need to add email field to booking model
     
-async def send_sms():
-    url = "https://www.fast2sms.com/dev/bulkV2"
-    api_key = SMS_KEY
-    msg='Your test booking is confirmed! Details: \nPhone: 9462255025 \nCity: Bangalore \nTest: Blood Test \nDate: 06-12-2024 \nTime: 10:00AM \nCollection: In-Clinic Collection  \nThank you for choosing us!'
-    querystring = {
-        "authorization": api_key,
-        "message": msg,
-        "language": "english",
-        "route": "q",
-        "numbers": "9462255025"
-    }
-    headers = {
-        'cache-control': "no-cache"
-    }
-    response = requests.request("GET", url, headers=headers, params=querystring)
-    return response.json() 
+    message = MIMEMultipart("alternative")
+    message["Subject"] = "Test Booking Confirmation"
+    message["From"] = sender_email
+    message["To"] = receiver_email
+
+    # Create HTML version of message
+    html = f"""
+    <html>
+        <body>
+            <h2>Your test booking is confirmed!</h2>
+            <p>Here are your booking details:</p>
+            <ul>
+                <li><b>Phone:</b> {booking.phone}</li>
+                <li><b>City:</b> {booking.city}</li>
+                <li><b>Test:</b> {booking.test_name}</li>
+                <li><b>Date:</b> {booking.preferred_date}</li>
+                <li><b>Time:</b> {booking.preferred_time}</li>
+                <li><b>Collection Type:</b> {booking.collection_type}</li>
+            </ul>
+            <p>Thank you for choosing us!</p>
+        </body>
+    </html>
+    """
+    
+    part = MIMEText(html, "html")
+    message.attach(part)
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, SMTP_PASSWORD)
+            server.sendmail(sender_email, receiver_email, message.as_string())
+        return {"status": "success", "message": "Confirmation email sent successfully"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=PORT)

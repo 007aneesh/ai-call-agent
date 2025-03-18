@@ -7,7 +7,7 @@ import os
 load_dotenv()
 
 Base = declarative_base()
-engine = create_engine(os.getenv('SQLALCHEMY_DATABASE_URI'))
+engine = create_engine(os.getenv('SQLALCHEMY_DATABASE_URI', 'sqlite:///bookings.db'))
 SessionLocal = sessionmaker(bind=engine)
 
 class Booking(Base):
@@ -15,6 +15,7 @@ class Booking(Base):
     
     id = Column(Integer, primary_key=True)
     phone = Column(String, nullable=False)
+    email = Column(String, nullable=False)  # Added email field
     city = Column(String, nullable=False)
     test_name = Column(String, nullable=False)
     preferred_date = Column(String, nullable=False)
@@ -24,11 +25,12 @@ class Booking(Base):
 
 Base.metadata.create_all(engine)
 
-def create_booking(phone, city, test_name, preferred_date, preferred_time, collection_type, booking_datetime):
+def create_booking(phone, email, city, test_name, preferred_date, preferred_time, collection_type, booking_datetime):
     db = SessionLocal()
     try:
         booking = Booking(
             phone=phone,
+            email=email,
             city=city,
             test_name=test_name,
             preferred_date=preferred_date,
