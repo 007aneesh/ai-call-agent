@@ -30,3 +30,12 @@ websockets==13.1
 yarl==1.12.1
 requests
 SQLAlchemy==2.0.27
+python-dotenv
+fastapi
+uvicorn
+websockets
+openai
+requests
+sqlalchemy
+python-multipart
+email-validator
