@@ -30,3 +30,7 @@ websockets==13.1
 yarl==1.12.1
 requests
 SQLAlchemy==2.0.27
+google-generativeai==0.3.2
+vosk==0.3.45
+sounddevice==0.4.6
+webrtcvad==2.0.10
